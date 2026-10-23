@@ -1,0 +1,9 @@
+Stage 2 installed.
+Quake tree: /home/tvk/Downloads/PS5_Quake3e
+ps5-homebrew-ui: /home/tvk/dev/ps5-homebrew-ui
+ps5-opengl SDK: /home/tvk/dev/ps5-opengl/build/sdk/ps5-opengl-gl46
+
+Build with:
+  cd /home/tvk/Downloads/PS5_Quake3e
+  rm -rf build/ps5-vr
+  PS5_HUI_DIR="/home/tvk/dev/ps5-homebrew-ui" PS5_OPENGL_PREFIX="/home/tvk/dev/ps5-opengl/build/sdk/ps5-opengl-gl46" ps5/tools/build-vr.sh

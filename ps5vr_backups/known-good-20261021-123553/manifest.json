@@ -1,0 +1,37 @@
+{
+  "project": "/home/tvk/Downloads/PS5_Quake3e",
+  "time": "20261021-123553",
+  "files": [
+    {
+      "path": "vendor/Quake3e/code/renderer/tr_scene.c",
+      "size": 15906,
+      "sha256": "bf871cfab4d992a29995286ad57f58355f800a9fc07cac851871c3bf07308eac",
+      "kind": "source"
+    },
+    {
+      "path": "ps5/q3vr/ps5_q3vr_engine.c",
+      "size": 5923,
+      "sha256": "46c4bc60d610dee6cf0dab58754449d2b8713f955fc065fff22b8582ad6c5b20",
+      "kind": "source"
+    },
+    {
+      "path": "build/ps5-vr/eboot.elf",
+      "size": 24959928,
+      "sha256": "f655863e7a9a83b750452443c9924e9b29719d9dad710f499b6ff5e36e95c480",
+      "kind": "binary"
+    },
+    {
+      "path": "build/ps5-vr/link/llvm-pie.elf",
+      "size": 58436296,
+      "sha256": "3cf6097bb5dde383402a3bf5377d0be47a1e7d59cc4e06c7f47afc5081465d7e",
+      "kind": "binary"
+    },
+    {
+      "path": "dist/PPSA99303/eboot.bin",
+      "size": 24396351,
+      "sha256": "affe17a3473387beddab01e1bac2d1c76a6410a37f284d02c5bc9fbb3ed77a3b",
+      "kind": "binary"
+    }
+  ],
+  "console_note": "Back up /data/homebrew/PPSA99303/baseq3/autoexec.cfg and the deployed eboot.bin separately on PS5 before replacement."
+}

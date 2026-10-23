@@ -1,0 +1,16 @@
+{
+  "files": [
+    {
+      "path": "code/cgame/cg_draw.c",
+      "upstream_sha256": "6ac7267402f16d77a403aed8bb987830a5567e4ca65909c52decce14955612ef",
+      "modified_sha256": "1cbf1894ed68ac9388af3c04aa4f3597f42a196118b1b4b8c8b8119543b21d5a"
+    },
+    {
+      "path": "code/cgame/cg_weapons.c",
+      "upstream_sha256": "aee4f5bc39cfc697a6a9ae83addf37c633e8237df9dd5373bd6f80373777da98",
+      "modified_sha256": "ab525cb279ba59f72ee0c79818ef18207fe84b7ab667f180cd2a44a07007181e"
+    }
+  ],
+  "license": "Quake III Arena GPL engine source; preserve upstream COPYING",
+  "note": "Apply against matching unmodified upstream files"
+}

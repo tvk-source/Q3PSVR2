@@ -1,0 +1,143 @@
+#ifndef GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES 1
+#endif
+#include <GL/gl.h>
+#include <GL/glext.h>
+#include <math.h>
+#include <string.h>
+#include "ps5_q3vr.h"
+#include "ps5_q3vr_gl.h"
+#include "ps5_q3vr_engine.h"
+
+extern void say(const char *fmt, ...);
+
+static ps5_q3vr_frame_t s_frame;
+static int s_have_frame;
+static int s_backend_eye;
+static float s_world_scale = 32.0f; /* Q3VR convention: Quake units per metre */
+
+static void qmul(const float a[4], const float b[4], float o[4]) {
+    float r[4]={
+        a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],
+        a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
+        a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],
+        a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]};
+    memcpy(o,r,sizeof r);
+}
+static void qinv(const float q[4], float o[4]) { o[0]=-q[0];o[1]=-q[1];o[2]=-q[2];o[3]=q[3]; }
+static void qrot(const float q[4], const float v[3], float o[3]) {
+    float x=q[0],y=q[1],z=q[2],w=q[3];
+    float tx=2*(y*v[2]-z*v[1]),ty=2*(z*v[0]-x*v[2]),tz=2*(x*v[1]-y*v[0]);
+    o[0]=v[0]+w*tx+(y*tz-z*ty);o[1]=v[1]+w*ty+(z*tx-x*tz);o[2]=v[2]+w*tz+(x*ty-y*tx);
+}
+static void local_to_world(const float base[3][3], const float v[3], float out[3]) {
+    for(int k=0;k<3;k++) out[k]=base[0][k]*v[0]+base[1][k]*v[1]+base[2][k]*v[2];
+}
+static void tracker_vec_to_q3_local(const float v[3], float q[3]) {
+    /* tracker: +x right,+y up,-z forward; Quake local components are forward,left,up */
+    q[0]=-v[2]; q[1]=-v[0]; q[2]=v[1];
+}
+
+int PS5Q3VR_IsActive(void){ return ps5_q3vr_active(); }
+int PS5Q3VR_BeginEye(int stereo_frame){
+    int eye=stereo_frame==2?1:0;
+    if(!ps5_q3vr_active()) return 0;
+    if(eye==0 || !s_have_frame){
+        ps5_q3vr_wait_slot();
+        if(!ps5_q3vr_begin(&s_frame)) return 0;
+        s_have_frame=1;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER,ps5_q3vr_gl_fbo());
+    glEnable(GL_SCISSOR_TEST);
+    return 1;
+}
+void PS5Q3VR_EndFrame(void){
+    if(!ps5_q3vr_active()||!s_have_frame) return;
+    ps5_q3vr_gl_fill(s_frame.buffer);
+    ps5_q3vr_submit();
+    s_have_frame=0;
+}
+void PS5Q3VR_Recenter(void){ ps5_q3vr_recenter(); }
+
+void PS5Q3VR_SetBackendEye(int eye){
+    s_backend_eye = eye ? 1 : 0;
+}
+
+int PS5Q3VR_Get2DViewport(int *x,int *y,int *w,int *h){
+    int e;
+    if(!ps5_q3vr_active()) return 0;
+
+    e=ps5_q3vr_gl_eye_size();
+
+    if(x) *x=s_backend_eye ? e : 0;
+    if(y) *y=0;
+    if(w) *w=e;
+    if(h) *h=e;
+
+    return 1;
+}
+
+/* Head-locked virtual-panel stereo prototype.
+ * Project the same physical point in front of the midpoint of the two eyes
+ * using each eye's own asymmetric FOV, then report how far that point falls
+ * from the exact center of the per-eye framebuffer. Our existing Quake 2D
+ * rendering can apply this shift to a centered rectangular UI viewport.
+ * No world / cgame camera transform is changed by this function.
+ */
+int PS5Q3VR_GetUIParallaxShift(float distance_m, int *shift_x, int *shift_y) {
+    if (!ps5_q3vr_active() || !s_have_frame) return 0;
+    if (distance_m < 0.5f) distance_m = 0.5f;
+    if (distance_m > 10.0f) distance_m = 10.0f;
+
+    const int eye = s_backend_eye ? 1 : 0;
+    const float headCenter[3] = {
+        0.5f*(s_frame.eye[0].pos[0]+s_frame.eye[1].pos[0]),
+        0.5f*(s_frame.eye[0].pos[1]+s_frame.eye[1].pos[1]),
+        0.5f*(s_frame.eye[0].pos[2]+s_frame.eye[1].pos[2])
+    };
+    const float delta[3] = {
+        s_frame.eye[eye].pos[0]-headCenter[0],
+        s_frame.eye[eye].pos[1]-headCenter[1],
+        s_frame.eye[eye].pos[2]-headCenter[2]
+    };
+    float invQ[4], eyeLocal[3];
+    qinv(s_frame.eye[0].quat, invQ);
+    qrot(invQ, delta, eyeLocal);
+
+    /* Headset local: +x right, +y up, -z forward. */
+    float depth = distance_m + eyeLocal[2];
+    if (depth < 0.1f) depth = 0.1f;
+    const float targetTanX = -eyeLocal[0] / depth;
+    const float targetTanY = -eyeLocal[1] / depth;
+    const float l = -s_frame.eye[eye].tan[0];
+    const float r =  s_frame.eye[eye].tan[1];
+    const float t =  s_frame.eye[eye].tan[2];
+    const float b = -s_frame.eye[eye].tan[3];
+    if (r-l < 0.01f || t-b < 0.01f) return 0;
+
+    const int e = ps5_q3vr_gl_eye_size();
+    /* Desired UI rectangle center relative to framebuffer center. */
+    if (shift_x) *shift_x = (int)lroundf(e*((targetTanX-l)/(r-l)-0.5f));
+    if (shift_y) *shift_y = (int)lroundf(e*((targetTanY-b)/(t-b)-0.5f));
+    return 1;
+}
+
+int PS5Q3VR_GetView(int eye,const float base_origin[3],const float base_axis[3][3],
+                    float out_origin[3],float out_axis[3][3],float out_proj[16],
+                    int *vx,int *vy,int *vw,int *vh){
+    if(!ps5_q3vr_active()||!s_have_frame||eye<0||eye>1) return 0;
+    float op[3],oy[4],iy[4],relq[4]; ps5_q3vr_origin(op,oy); qinv(oy,iy); qmul(iy,s_frame.eye[eye].quat,relq);
+    float dp[3]={s_frame.eye[eye].pos[0]-op[0],s_frame.eye[eye].pos[1]-op[1],s_frame.eye[eye].pos[2]-op[2]};
+    float dplocal_tracker[3]; qrot(iy,dp,dplocal_tracker); float dplocal_q3[3],dpworld[3]; tracker_vec_to_q3_local(dplocal_tracker,dplocal_q3); local_to_world(base_axis,dplocal_q3,dpworld);
+    for(int k=0;k<3;k++) out_origin[k]=base_origin[k]+dpworld[k]*s_world_scale;
+
+    const float tfwd[3]={0,0,-1},tleft[3]={-1,0,0},tup[3]={0,1,0};
+    float rf[3],rl[3],ru[3],lf[3],ll[3],lu[3]; qrot(relq,tfwd,rf);qrot(relq,tleft,rl);qrot(relq,tup,ru);
+    tracker_vec_to_q3_local(rf,lf);tracker_vec_to_q3_local(rl,ll);tracker_vec_to_q3_local(ru,lu);
+    local_to_world(base_axis,lf,out_axis[0]);local_to_world(base_axis,ll,out_axis[1]);local_to_world(base_axis,lu,out_axis[2]);
+
+    float l=-s_frame.eye[eye].tan[0],r=s_frame.eye[eye].tan[1],t=s_frame.eye[eye].tan[2],b=-s_frame.eye[eye].tan[3];
+    memset(out_proj,0,16*sizeof(float));out_proj[0]=2.0f/(r-l);out_proj[5]=2.0f/(t-b);out_proj[8]=(r+l)/(r-l);out_proj[9]=(t+b)/(t-b);out_proj[10]=-1.0f;out_proj[11]=-1.0f;out_proj[14]=-8.0f;
+    int e=ps5_q3vr_gl_eye_size(); if(vx)*vx=eye?e:0;if(vy)*vy=0;if(vw)*vw=e;if(vh)*vh=e;
+    return 1;
+}

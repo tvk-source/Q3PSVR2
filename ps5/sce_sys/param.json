@@ -6,10 +6,10 @@
   "applicationDrmType": "free",
   "attribute": 0,
   "attribute2": 0,
-  "attribute3": 524352,
+  "attribute3": 527424,
   "conceptId": "99303",
   "contentBadgeType": 1,
-  "contentId": "UP9000-PPSA99303_00-QUAKE3E000000000",
+  "contentId": "UP9000-PPSA99431_00-QUAKE3E000000000",
   "contentVersion": "01.002.000",
   "downloadDataSize": 256,
   "gameIntent": {
@@ -25,7 +25,7 @@
   "localizedParameters": {
     "defaultLanguage": "en-US",
     "en-US": {
-      "titleName": "Quake III Arena"
+      "titleName": "Quake III PSVR2"
     }
   },
   "masterVersion": "01.00",
@@ -36,6 +36,6 @@
   },
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
-  "titleId": "PPSA99303",
+  "titleId": "PPSA99431",
   "versionFileUri": ""
 }

@@ -25,6 +25,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -148,6 +149,8 @@ static int Sys_ListExtFiles( const char *directory, const char *subdir, const ch
 	}
 
 	if ((fdir = opendir(search)) == NULL) {
+		Com_Printf("PS5 FS: opendir(%s) failed: errno=%d (%s)\n",
+			search, errno, strerror(errno));
 		return nfiles;
 	}
 

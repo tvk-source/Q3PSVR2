@@ -1,0 +1,415 @@
+--- a/code/cgame/cg_draw.c
++++ b/code/cgame/cg_draw.c
+@@ -521,6 +521,57 @@
+ 
+ ================
+ */
++/* PS5VR_PCVR_VISUAL_V1 */
++/* minimalist center-bottom QVM HUD.
++ * Drawn in the existing PS5VR UI path, never touches menus or bot chat.
++ * UI cvars are read from supported Quake III QVM syscall. */
++static void PS5VR_PCHud(void) {
++    playerState_t *ps;
++    int gun, ammo, hp, armor, cw, ch, icon;
++    float scale, y, gap;
++    vec4_t ammoColor = {1.0f, 0.72f, 0.18f, 1.0f};
++    vec4_t hpColor = {1.0f, 0.72f, 0.18f, 1.0f};
++    vec4_t armorColor = {0.48f, 0.85f, 1.0f, 1.0f};
++    char raw[64];
++    if (!cg.snap) return;
++    ps = &cg.snap->ps;
++    gun = cg.predictedPlayerState.weapon;
++    ammo = (gun > 0 && gun < MAX_WEAPONS) ? ps->ammo[gun] : -1;
++    hp = ps->stats[STAT_HEALTH];
++    armor = ps->stats[STAT_ARMOR];
++    trap_Cvar_VariableStringBuffer("ps5vr_pcvrHudScale", raw, sizeof(raw));
++    scale = raw[0] ? (float)atof(raw) : 0.75f;
++    if (scale < 0.45f) scale = 0.45f;
++    if (scale > 1.30f) scale = 1.30f;
++    trap_Cvar_VariableStringBuffer("ps5vr_pcvrHudY", raw, sizeof(raw));
++    y = raw[0] ? (float)atof(raw) : 423.0f;
++    if (y < 325.0f) y = 325.0f;
++    if (y > 462.0f) y = 462.0f;
++    cw = (int)(17.0f * scale);
++    ch = (int)(24.0f * scale);
++    icon = (int)(26.0f * scale);
++    gap = 98.0f * scale;
++    if (hp < 26) {
++        hpColor[0] = 1.0f; hpColor[1] = .25f; hpColor[2] = .25f;
++    }
++    if (ammo >= 0) {
++        if (gun < MAX_WEAPONS && cg_weapons[gun].ammoIcon) {
++            CG_DrawPic(320 - gap - icon - 3, y-2, icon, icon, cg_weapons[gun].ammoIcon);
++        }
++        CG_DrawStringExt((int)(320 - gap), (int)y, va("%i", ammo), ammoColor,
++                         qtrue, qfalse, cw, ch, 3);
++    }
++    CG_DrawStringExt((int)(320 - (hp < 100 ? 12*scale : 18*scale)), (int)y,
++                     va("%i", hp), hpColor, qtrue, qfalse, cw, ch, 3);
++    if (armor > 0) {
++        CG_DrawStringExt((int)(320 + gap), (int)y,
++                         va("%i", armor), armorColor, qtrue, qfalse, cw, ch, 3);
++        if (cgs.media.armorIcon) {
++            CG_DrawPic(320 + gap + 3*cw + 3, y-2, icon, icon, cgs.media.armorIcon);
++        }
++    }
++}
++
+ #ifndef MISSIONPACK
+ static void CG_DrawStatusBar( void ) {
+ 	int			color;
+@@ -543,6 +594,15 @@
+ 	if ( cg_drawStatus.integer == 0 ) {
+ 		return;
+ 	}
++    /* Optional compact PCVR-style in-game status; menus and chat unchanged. */
++    {
++        char raw[32];
++        trap_Cvar_VariableStringBuffer("ps5vr_pcvrHud", raw, sizeof(raw));
++        if (raw[0] && atof(raw) > 0.5f) {
++            PS5VR_PCHud();
++            return;
++        }
++    }
+ 
+ 	// draw the team background
+ 	CG_DrawTeamBackground( 0, 420, 640, 60, 0.33f, cg.snap->ps.persistant[PERS_TEAM] );
+@@ -1913,6 +1973,135 @@
+ CG_DrawCrosshair
+ =================
+ */
++/* PS5VR_VM_AIM_V1_BEGIN */
++#ifndef RF_CROSSHAIR
++#define RF_CROSSHAIR 0x0010
++#endif
++
++/*
++ * Experimental VR reticle: use cgame collision against static BSP AND
++ * snapshot entities, unlike the PS5 renderer's static-BSP-only trace.
++ * This module still uses the existing Quake gameplay aim.  It deliberately
++ * does NOT modify bullet direction or VR camera transforms.
++ *
++ * Source is GPLv2+ derived from id Software Quake III Arena cgame.
++ */
++/* Stock Quake III cgame.qvm has no trap_Cvar_VariableValue syscall. */
++static float PS5VR_VM_CvarValue(const char *name) {
++    char value[64];
++    value[0] = '\0';
++    trap_Cvar_VariableStringBuffer(name, value, sizeof(value));
++    return (float)atof(value);
++}
++
++static void PS5VR_DrawVMReticle(void) {
++    static qhandle_t ps5vrReticleShader = 0;
++    static qboolean ps5vrAnnounced = qfalse;
++    refEntity_t ent;
++    trace_t trace;
++    vec3_t muzzle, forward, endpoint, target, delta;
++    float range, angularSize, separation, gap, distance;
++    int k;
++
++    if (PS5VR_VM_CvarValue("ps5vr_vmReticle") < 0.5f &&
++        PS5VR_VM_CvarValue("ps5vr_laserSight") < 0.5f) return;
++    if (!cg.snap || cg.levelShot || cg.renderingThirdPerson || cg.showScores) return;
++    if (cg.snap->ps.pm_type == PM_INTERMISSION) return;
++    if (cg.snap->ps.persistant[PERS_TEAM] == TEAM_SPECTATOR) return;
++    if (cg.snap->ps.stats[STAT_HEALTH] <= 0) return;
++
++    if (!ps5vrAnnounced) {
++        CG_Printf("^2PS5VR VM aim v1: gameplay trace enabled (QVM)\n");
++        ps5vrAnnounced = qtrue;
++    }
++    if (!ps5vrReticleShader) {
++        ps5vrReticleShader = trap_R_RegisterShader("ps5vr/reticle");
++        if (!ps5vrReticleShader) {
++            CG_Printf("^1PS5VR QVM reticle shader missing: install zzzz-ps5vr-reticle.pk3\n");
++            return;
++        }
++    }
++
++    /* Mirrors the server's CalcMuzzlePointOrigin convention: prediction
++     * origin + viewheight + 14 units forward using player viewangles.
++     * The exact shot point can still differ for specific weapons/frames. */
++    AngleVectors(cg.predictedPlayerState.viewangles, forward, NULL, NULL);
++    VectorCopy(cg.predictedPlayerState.origin, muzzle);
++    muzzle[2] += cg.predictedPlayerState.viewheight;
++    VectorMA(muzzle, 14.0f, forward, muzzle);
++
++    range = PS5VR_VM_CvarValue("ps5vr_vmReticleRange");
++    if (range < 128.0f) range = 4096.0f;
++    if (range > 16384.0f) range = 16384.0f;
++    VectorMA(muzzle, range, forward, endpoint);
++    CG_Trace(&trace, muzzle, vec3_origin, vec3_origin, endpoint,
++             cg.predictedPlayerState.clientNum, MASK_SHOT);
++    if (trace.startsolid || trace.allsolid) return;
++    VectorCopy(trace.endpos, target);
++
++    /* Offset a hit in the collision plane normal to avoid Z fighting.
++     * We do not use depth hack unless the user explicitly requests it. */
++    if (trace.fraction < 1.0f) {
++        gap = PS5VR_VM_CvarValue("ps5vr_vmReticleOffset");
++        if (gap < 0.0f) gap = 0.0f;
++        if (gap > 6.0f) gap = 6.0f;
++        if (gap < 0.01f) gap = 1.0f;
++        VectorMA(target, gap, trace.plane.normal, target);
++    }
++
++    /* Q3PSVR2_LASER_V1: uses the same gameplay hit as our QVM reticle.
++     * RT_RAIL_CORE exists in stock Quake III: draws a 3D beam between
++     * origin and oldorigin; the rail shader may affect thickness/colour.
++     * One beam per scene build. NO extra collision trace. */
++    if (PS5VR_VM_CvarValue("ps5vr_laserSight") > 0.5f) {
++        refEntity_t beam;
++        if (cgs.media.railCoreShader) {
++            memset(&beam, 0, sizeof(beam));
++            beam.reType = RT_RAIL_CORE;
++            beam.customShader = cgs.media.railCoreShader;
++            VectorCopy(muzzle, beam.origin);
++            if (trace.fraction < 1.0f) {
++                VectorMA(trace.endpos, -1.5f, forward, beam.oldorigin);
++            } else {
++                VectorCopy(trace.endpos, beam.oldorigin);
++            }
++            beam.shaderRGBA[0] = 255;
++            beam.shaderRGBA[1] = 40;
++            beam.shaderRGBA[2] = 30;
++            beam.shaderRGBA[3] = 120;
++            trap_R_AddRefEntityToScene(&beam);
++        }
++    }
++
++    if (PS5VR_VM_CvarValue("ps5vr_vmReticle") < 0.5f) return;
++    VectorSubtract(target, cg.refdef.vieworg, delta);
++    distance = VectorLength(delta);
++    if (distance < 4.0f) return; /* behind/inside stereo near plane */
++    angularSize = PS5VR_VM_CvarValue("ps5vr_vmReticleAngle");
++    if (angularSize < 0.2f) angularSize = 2.5f;
++    if (angularSize > 8.0f) angularSize = 8.0f;
++    /* tan(theta/2) ~= theta/2 to better than 0.2% for <=8 degrees;
++     * avoids relying on math-library functions in the QVM toolchain. */
++    separation = distance * angularSize * 0.00872664626f;
++    if (separation < 0.65f) separation = 0.65f;
++    if (separation > 225.0f) separation = 225.0f;
++
++    memset(&ent, 0, sizeof(ent));
++    ent.reType = RT_SPRITE;
++    ent.radius = separation;
++    ent.customShader = ps5vrReticleShader;
++    if (PS5VR_VM_CvarValue("ps5vr_vmReticleDepthHack") > 0.5f) {
++        ent.renderfx = RF_DEPTHHACK | RF_CROSSHAIR;
++    }
++    for (k = 0; k < 3; ++k) ent.origin[k] = target[k];
++    ent.shaderRGBA[0] = 255;
++    ent.shaderRGBA[1] = 255;
++    ent.shaderRGBA[2] = 255;
++    ent.shaderRGBA[3] = 255;
++    trap_R_AddRefEntityToScene(&ent);
++}
++/* PS5VR_VM_AIM_V1_END */
++
+ static void CG_DrawCrosshair(void) {
+ 	float		w, h;
+ 	qhandle_t	hShader;
+@@ -2644,6 +2833,7 @@
+ 	}
+ 
+ 	// draw 3D view
++	PS5VR_DrawVMReticle();
+ 	trap_R_RenderScene( &cg.refdef );
+ 
+ 	// restore original viewpoint if running stereo
+--- a/code/cgame/cg_weapons.c
++++ b/code/cgame/cg_weapons.c
+@@ -1239,6 +1239,10 @@
+ 	VectorCopy( parent->lightingOrigin, gun.lightingOrigin );
+ 	gun.shadowPlane = parent->shadowPlane;
+ 	gun.renderfx = parent->renderfx;
++    /* PS5VR_GUN_SCALE_V2: preserve parent model scale on attached view gun. */
++    if (ps && parent->nonNormalizedAxes) {
++        gun.nonNormalizedAxes = qtrue;
++    }
+ 
+ 	// set custom shading for railgun refire rate
+ 	if ( ps ) {
+@@ -1285,6 +1289,9 @@
+ 		VectorCopy( parent->lightingOrigin, barrel.lightingOrigin );
+ 		barrel.shadowPlane = parent->shadowPlane;
+ 		barrel.renderfx = parent->renderfx;
++        if (ps && gun.nonNormalizedAxes) {
++            barrel.nonNormalizedAxes = qtrue;
++        }
+ 
+ 		barrel.hModel = weapon->barrelModel;
+ 		angles[YAW] = 0;
+@@ -1323,6 +1330,9 @@
+ 	VectorCopy( parent->lightingOrigin, flash.lightingOrigin );
+ 	flash.shadowPlane = parent->shadowPlane;
+ 	flash.renderfx = parent->renderfx;
++    if (ps && gun.nonNormalizedAxes) {
++        flash.nonNormalizedAxes = qtrue;
++    }
+ 
+ 	flash.hModel = weapon->flashModel;
+ 	if (!flash.hModel) {
+@@ -1368,6 +1378,51 @@
+ Add the weapon, and flash for the player's view
+ ==============
+ */
++/* PS5VR_GUN_STEREO_AB_V1 */
++/* Stock VM syscalls only: no trap_Cvar_VariableValue symbol. */
++static float PS5VR_GunAB_Cvar(const char *key, float defaultValue) {
++    char raw[64];
++    trap_Cvar_VariableStringBuffer(key, raw, sizeof(raw));
++    if (!raw[0]) return defaultValue;
++    return (float)atof(raw);
++}
++
++static float PS5VR_GunAB_Clamp(float x, float low, float high) {
++    if (x < low) return low;
++    if (x > high) return high;
++    return x;
++}
++
++/* PS5VR_PCVR_VISUAL_V1 */
++/* PCVR profiles: RippeR37/q3vr code/vr/vr_cvars.c (GPLv2).
++ * format: scale, right, up, forward, pitch, yaw, roll. */
++static void PS5VR_PCProfile(int weapon, float *scale, float *right,
++                             float *up, float *forward, float *pitch,
++                             float *yaw, float *roll) {
++    *scale = 1.0f; *right = 0.0f; *up = 0.0f;
++    *forward = 0.0f; *pitch = 0.0f; *yaw = 0.0f; *roll = 0.0f;
++    switch (weapon) {
++    case 1: *scale=1.0f; *right=-4.0f; *up=7.0f; *forward=-10.0f; *pitch=-20.0f; *yaw=-15.0f; break;
++    case 2: *scale=.80f; *right=-3.0f; *up=5.5f; break;
++    case 3: *scale=.80f; *right=-3.3f; *up=8.0f; *forward=3.7f; break;
++    case 4: *scale=.75f; *right=-5.4f; *up=6.5f; *forward=-4.0f; break;
++    case 5: *scale=.80f; *right=-5.2f; *up=6.0f; *forward=7.5f; break;
++    case 6: *scale=.80f; *right=-3.3f; *up=6.0f; *forward=7.0f; break;
++    case 7: *scale=.80f; *right=-5.5f; *up=6.0f; break;
++    case 8: *scale=.80f; *right=-4.5f; *up=6.0f; *forward=1.5f; break;
++    case 9: *scale=.80f; *right=-5.5f; *up=6.0f; break;
++    case 11: case 12: case 13: *scale=.80f; *right=-5.5f; *up=6.0f; break;
++    default: break;
++    }
++}
++
++static float PS5VR_PCProfileScale(int weapon) {
++    float s, r, u, f, p, y, roll;
++    if (PS5VR_GunAB_Cvar("ps5vr_pcvrGun", 0.0f) < 0.5f) return 1.0f;
++    PS5VR_PCProfile(weapon, &s, &r, &u, &f, &p, &y, &roll);
++    return s;
++}
++
+ void CG_AddViewWeapon( playerState_t *ps ) {
+ 	refEntity_t	hand;
+ 	centity_t	*cent;
+@@ -1429,7 +1484,94 @@
+ 	VectorMA( hand.origin, cg_gun_y.value, cg.refdef.viewaxis[1], hand.origin );
+ 	VectorMA( hand.origin, (cg_gun_z.value+fovOffset), cg.refdef.viewaxis[2], hand.origin );
+ 
++/* PS5VR_GUN_STEREO_AB_POSITION */
++    /* Applies to the visible view weapon only. Gameplay aim is unchanged.
++     * Q3 viewaxis: [0] forward, [1] left, [2] up. */
++    if (PS5VR_GunAB_Cvar("ps5vr_vmGunMode", 0.0f) >= 0.5f) {
++        float gunForward = PS5VR_GunAB_Clamp(PS5VR_GunAB_Cvar("ps5vr_vmGunForward", 0.0f), -8.0f, 32.0f);
++        float gunRight   = PS5VR_GunAB_Clamp(PS5VR_GunAB_Cvar("ps5vr_vmGunRight", 0.0f), -16.0f, 16.0f);
++        float gunDown    = PS5VR_GunAB_Clamp(PS5VR_GunAB_Cvar("ps5vr_vmGunDown", 0.0f), -16.0f, 24.0f);
++        VectorMA(hand.origin, gunForward, cg.refdef.viewaxis[0], hand.origin);
++        VectorMA(hand.origin, -gunRight, cg.refdef.viewaxis[1], hand.origin);
++        VectorMA(hand.origin, -gunDown, cg.refdef.viewaxis[2], hand.origin);
++    }
++
++
++    /* PS5VR_PCVR_VISUAL_V1: optional controller-less PCVR visual emulation.
++     * Preserve actual firing direction, collision, VR eye transforms and reticle.
++     * PCVR itself anchors this pose on an OpenXR hand. Our anchor is synthetic. */
++    if (PS5VR_GunAB_Cvar("ps5vr_pcvrGun", 0.0f) > 0.5f &&
++        PS5VR_GunAB_Cvar("ps5vr_vmGunMode", 0.0f) > 0.5f) {
++        float s, side, up, fwd, pitch, yaw, roll;
++        float handForward, handRight, handDown;
++        vec3_t wf, wr, wu;
++        PS5VR_PCProfile(ps->weapon, &s, &side, &up, &fwd, &pitch, &yaw, &roll);
++        handForward = PS5VR_GunAB_Clamp(PS5VR_GunAB_Cvar("ps5vr_pcvrHandForward", 18.0f), 0.0f, 48.0f);
++        handRight = PS5VR_GunAB_Clamp(PS5VR_GunAB_Cvar("ps5vr_pcvrHandRight", 7.0f), -20.0f, 20.0f);
++        handDown = PS5VR_GunAB_Clamp(PS5VR_GunAB_Cvar("ps5vr_pcvrHandDown", 8.0f), -20.0f, 32.0f);
++        VectorMA(hand.origin, handForward, cg.refdef.viewaxis[0], hand.origin);
++        /* Quake refdef.viewaxis[1] points LEFT, not right. */
++        VectorMA(hand.origin, -handRight, cg.refdef.viewaxis[1], hand.origin);
++        VectorMA(hand.origin, -handDown, cg.refdef.viewaxis[2], hand.origin);
++        angles[PITCH] += pitch;
++        angles[YAW] += yaw;
++        angles[ROLL] += roll;
++        AngleVectors(angles, wf, wr, wu);
++        VectorMA(hand.origin, side*s, wr, hand.origin);
++        VectorMA(hand.origin, up*s, wu, hand.origin);
++        VectorMA(hand.origin, fwd*s, wf, hand.origin);
++        if (PS5VR_GunAB_Cvar("ps5vr_pcvrAimFollow", 1.0f) > 0.5f &&
++            ps->stats[STAT_HEALTH] > 0) {
++            static int cachedTime = -1;
++            static qboolean cachedValid = qfalse;
++            static vec3_t cachedHit;
++            vec3_t visualDir;
++            /* Same source and range convention as existing QVM reticle.
++             * Once per cg.time (not each stereo eye) to limit QVM work. */
++            if (cachedTime != cg.time) {
++                trace_t aimTrace;
++                vec3_t shotFrom, shotDir, shotEnd;
++                AngleVectors(cg.predictedPlayerState.viewangles, shotDir, NULL, NULL);
++                VectorCopy(cg.predictedPlayerState.origin, shotFrom);
++                shotFrom[2] += cg.predictedPlayerState.viewheight;
++                VectorMA(shotFrom, 14.0f, shotDir, shotFrom);
++                VectorMA(shotFrom, 4096.0f, shotDir, shotEnd);
++                CG_Trace(&aimTrace, shotFrom, vec3_origin, vec3_origin,
++                         shotEnd, cg.predictedPlayerState.clientNum, MASK_SHOT);
++                cachedValid = !aimTrace.startsolid && !aimTrace.allsolid;
++                if (cachedValid) VectorCopy(aimTrace.endpos, cachedHit);
++                cachedTime = cg.time;
++            }
++            if (cachedValid) {
++                VectorSubtract(cachedHit, hand.origin, visualDir);
++                if (VectorLength(visualDir) > 16.0f) {
++                    vectoangles(visualDir, angles);
++                    /* For angled Gauntlet profile preserve PCVR tool rotation. */
++                    angles[PITCH] += pitch;
++                    angles[YAW] += yaw;
++                    angles[ROLL] = roll;
++                }
++            }
++        }
++    }
++
+ 	AnglesToAxis( angles, hand.axis );
++
++    /* PS5VR_GUN_SCALE_V2: true geometry/tag scale, unlike gunForward.
++     * Only touches the first-person view weapon when RF_DEPTHHACK is off.
++     * The raycast reticle and actual firing direction are unchanged. */
++    if (PS5VR_GunAB_Cvar("ps5vr_vmGunMode", 0.0f) >= 0.5f) {
++        float gunScale = PS5VR_GunAB_Clamp(
++            PS5VR_GunAB_Cvar("ps5vr_vmGunScale", 1.0f) *
++            PS5VR_PCProfileScale(ps->weapon), 0.20f, 1.25f);
++        if (gunScale != 1.0f) {
++            int axis;
++            for (axis = 0; axis < 3; ++axis) {
++                VectorScale(hand.axis[axis], gunScale, hand.axis[axis]);
++            }
++            hand.nonNormalizedAxes = qtrue;
++        }
++    }
+ 
+ 	// map torso animations to weapon animations
+ 	if ( cg_gun_frame.integer ) {
+@@ -1445,7 +1587,13 @@
+ 	}
+ 
+ 	hand.hModel = weapon->handsModel;
+-	hand.renderfx = RF_DEPTHHACK | RF_FIRST_PERSON | RF_MINLIGHT;
++	/* PS5VR_GUN_STEREO_AB_RENDERFX */
++    /* Quake3e's legacy RF_DEPTHHACK switches the stereo gun projection.
++     * PSVR2 already supplies a per-eye asymmetric projection. Removing
++     * depthhack is experimental; it may clip the gun into world geometry. */
++    hand.renderfx = PS5VR_GunAB_Cvar("ps5vr_vmGunMode", 0.0f) >= 0.5f
++        ? (RF_FIRST_PERSON | RF_MINLIGHT)
++        : (RF_DEPTHHACK | RF_FIRST_PERSON | RF_MINLIGHT);
+ 
+ 	// add everything onto the hand
+ 	CG_AddPlayerWeapon( &hand, ps, &cg.predictedPlayerEntity, ps->persistant[PERS_TEAM] );
