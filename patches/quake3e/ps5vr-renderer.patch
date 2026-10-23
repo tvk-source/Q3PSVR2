@@ -1,0 +1,468 @@
+diff --git a/code/renderer/qgl.h b/code/renderer/qgl.h
+index 113bce13..8757e49c 100644
+--- a/code/renderer/qgl.h
++++ b/code/renderer/qgl.h
+@@ -26,7 +26,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ #ifndef __QGL_H__
+ #define __QGL_H__
+ 
+-#if defined( _WIN32 )
++#if defined(PS5_Q3VR)
++/*
++ * PS5 uses ps5-opengl through EGL.
++ * Do not pull in GLX/X11 just because the PS5 target exposes
++ * FreeBSD-compatible platform macros.
++ */
++#include <GL/gl.h>
++#elif defined( _WIN32 )
+ #if _MSC_VER
+ #pragma warning (disable: 4201)
+ #pragma warning (disable: 4214)
+@@ -264,7 +271,10 @@ typedef char GLchar;
+ 	GLE( PROC,  wglGetProcAddress, LPCSTR ) \
+ 	GLE( BOOL,  wglMakeCurrent, HDC, HGLRC )
+ 
+-#ifdef _WIN32
++#if defined(PS5_Q3VR)
++/* EGL owns presentation/vsync on PS5; there are no GLX swap functions. */
++#define QGL_Swp_PROCS
++#elif defined(_WIN32)
+ #define QGL_Swp_PROCS \
+ 	GLE( BOOL,	wglSwapIntervalEXT, int interval )
+ #else
+@@ -286,7 +296,9 @@ typedef char GLchar;
+ 
+ #define GLE( ret, name, ... ) extern ret ( APIENTRY * q##name )( __VA_ARGS__ );
+ 	QGL_Swp_PROCS;
+-#ifdef _WIN32
++#if defined(PS5_Q3VR)
++	/* No WGL or GLX platform entry points: GLimp uses EGL directly. */
++#elif defined(_WIN32)
+ 	QGL_Win32_PROCS;
+ #else // assume in opposition to win32
+ 	QGL_LinX11_PROCS;
+diff --git a/code/renderer/tr_backend.c b/code/renderer/tr_backend.c
+index eae1d376..92f3976e 100644
+--- a/code/renderer/tr_backend.c
++++ b/code/renderer/tr_backend.c
+@@ -20,6 +20,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ===========================================================================
+ */
+ #include "tr_local.h"
++#ifdef PS5_Q3VR
++#include "ps5_q3vr_engine.h"
++/* PS5 bridge API for a binocularly projected head-centered UI prototype.
++ * Once a dedicated UI texture is introduced, this same transform can drive
++ * its virtual-screen geometry instead of the 2D viewport. */
++extern int PS5Q3VR_GetUIParallaxShift(float distance_m, int *shift_x, int *shift_y);
++#endif
+ 
+ backEndData_t	*backEndData;
+ backEndState_t	backEnd;
+@@ -968,8 +975,74 @@ void RB_SetGL2D( void ) {
+ 	backEnd.projection2D = qtrue;
+ 
+ 	// set 2D virtual screen size
++#ifdef PS5_Q3VR
++	{
++		int vx, vy, vw, vh;
++
++		if ( PS5Q3VR_Get2DViewport( &vx, &vy, &vw, &vh ) ) {
++			/*
++			 * Quake's 2D UI normally fills the entire per-eye texture.
++			 * The headset cannot show that whole texture comfortably.
++			 * Use a centered, adjustable viewport without modifying the
++			 * world/weapon projection or the game's logical 2D coordinates.
++			 * This is a temporary UI safe area, not a stereo virtual panel.
++			 */
++			static cvar_t *vrUiScale;
++			float scale;
++			int safeW, safeH;
++
++			if ( !vrUiScale ) {
++				vrUiScale = ri.Cvar_Get( "ps5vr_uiScale", "0.65", CVAR_ARCHIVE );
++			}
++			scale = vrUiScale ? vrUiScale->value : 0.65f;
++			if ( scale < 0.35f ) scale = 0.35f;
++			if ( scale > 1.0f ) scale = 1.0f;
++			safeW = (int)( vw * scale + 0.5f );
++			safeH = (int)( vh * scale + 0.5f );
++			vx += ( vw - safeW ) / 2;
++			vy += ( vh - safeH ) / 2;
++			vw = safeW;
++			vh = safeH;
++
++			/* Experimental stereo UI panel: both copies of the same
++			 * 2D content have corresponding eye-correct centers for a
++			 * virtual plane at a fixed headset-relative distance.
++			 * Keep it OFF by default until headset-tested. */
++			{
++				static cvar_t *vrUiPanel;
++				static cvar_t *vrUiPanelDistance;
++				int shiftX = 0, shiftY = 0;
++
++				if (!vrUiPanel) {
++					vrUiPanel = ri.Cvar_Get("ps5vr_uiPanel", "0", CVAR_ARCHIVE);
++					vrUiPanelDistance = ri.Cvar_Get("ps5vr_uiPanelDistance", "2.5", CVAR_ARCHIVE);
++				}
++				if (vrUiPanel->integer &&
++				    PS5Q3VR_GetUIParallaxShift(vrUiPanelDistance->value, &shiftX, &shiftY)) {
++					/* Safe bounds: a panel must never spill into the other eye. */
++					int pX, pY, pW, pH;
++					if (PS5Q3VR_Get2DViewport(&pX, &pY, &pW, &pH)) {
++						vx += shiftX;
++						vy += shiftY;
++						if (vx < pX) vx = pX;
++						if (vy < pY) vy = pY;
++						if (vx + vw > pX + pW) vx = pX + pW - vw;
++						if (vy + vh > pY + pH) vy = pY + pH - vh;
++					}
++				}
++			}
++
++			qglViewport( vx, vy, vw, vh );
++			qglScissor( vx, vy, vw, vh );
++		} else {
++			qglViewport( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
++			qglScissor( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
++		}
++	}
++#else
+ 	qglViewport( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
+ 	qglScissor( 0, 0, glConfig.vidWidth, glConfig.vidHeight );
++#endif
+ 	qglMatrixMode( GL_PROJECTION );
+ 	qglLoadMatrixf( GL_Ortho( 0, glConfig.vidWidth, glConfig.vidHeight, 0, 0, 1 ) );
+ 	qglMatrixMode( GL_MODELVIEW );
+@@ -1306,6 +1379,22 @@ static const void *RB_DrawBuffer( const void *data ) {
+ 
+ 	cmd = (const drawBufferCommand_t *)data;
+ 
++#ifdef PS5_Q3VR
++	if ( PS5Q3VR_IsActive() ) {
++		/*
++		 * CRITICAL: Flush the previous eye's queued 2D quads before
++		 * changing eye/viewport. Cinematics often draw the same shader
++		 * in both eyes; otherwise left-eye quads stay batched until the
++		 * right eye is active, making the video appear right-eye only.
++		 */
++		RB_EndSurface();
++
++		/* Each deferred draw-buffer command carries its own eye. */
++		PS5Q3VR_SetBackendEye( cmd->ps5vrEye );
++		backEnd.projection2D = qfalse;
++	}
++#endif
++
+ #ifdef USE_FBO
+ 	if ( fboEnabled ) {
+ 		FBO_BindMain();
+@@ -1317,6 +1406,28 @@ static const void *RB_DrawBuffer( const void *data ) {
+ 	qglDrawBuffer( cmd->buffer );
+ #endif
+ 
++#ifdef PS5_Q3VR
++	if ( PS5Q3VR_IsActive() ) {
++		/*
++		 * Clear the COMPLETE per-eye image before drawing this eye.
++		 * Otherwise the pixels outside the smaller 2D safe area retain
++		 * a previous frame's menu or cinematic contents.
++		 * Clearing here also keeps both stereo eyes independent.
++		 */
++		int eyeX, eyeY, eyeW, eyeH;
++		if ( PS5Q3VR_Get2DViewport( &eyeX, &eyeY, &eyeW, &eyeH ) ) {
++			GLfloat previousClear[4];
++			glGetFloatv( GL_COLOR_CLEAR_VALUE, previousClear );
++			qglEnable( GL_SCISSOR_TEST );
++			qglScissor( eyeX, eyeY, eyeW, eyeH );
++			qglClearColor( 0, 0, 0, 1 );
++			qglClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
++			qglClearColor( previousClear[0], previousClear[1],
++			                previousClear[2], previousClear[3] );
++		}
++	}
++#endif
++
+ 	// clear screen for debugging
+ 	if ( r_clear->integer ) {
+ 		qglClearColor( 1, 0, 0.5, 1 );
+diff --git a/code/renderer/tr_cmds.c b/code/renderer/tr_cmds.c
+index 40cb4dbb..b81865ba 100644
+--- a/code/renderer/tr_cmds.c
++++ b/code/renderer/tr_cmds.c
+@@ -20,6 +20,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ===========================================================================
+ */
+ #include "tr_local.h"
++#ifdef PS5_Q3VR
++#include "ps5_q3vr_engine.h"
++#endif
+ 
+ /*
+ =====================
+@@ -294,6 +297,10 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
+ 	if ( !tr.registered ) {
+ 		return;
+ 	}
++#ifdef PS5_Q3VR
++	if ( PS5Q3VR_IsActive() && stereoFrame != STEREO_CENTER )
++		PS5Q3VR_BeginEye( stereoFrame );
++#endif
+ 
+ 	glState.finishCalled = qfalse;
+ 
+@@ -310,8 +317,21 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
+ 	if ( ( cmd = R_GetCommandBuffer( sizeof( *cmd ) ) ) == NULL )
+ 		return;
+ 	cmd->commandId = RC_DRAW_BUFFER;
++#ifdef PS5_Q3VR
++	/*
++	 * The renderer backend executes later, after both stereo eyes have
++	 * already been queued. Carry the eye with the draw-buffer command
++	 * instead of relying on frontend global state.
++	 */
++	cmd->ps5vrEye = (stereoFrame == STEREO_RIGHT) ? 1 : 0;
++#endif
+ 
+ 	if ( glConfig.stereoEnabled ) {
++#ifdef PS5_Q3VR
++		/* Both eyes are halves of one FBO, not quad-buffer stereo surfaces. */
++		cmd->buffer = PS5Q3VR_IsActive() ? (int)GL_COLOR_ATTACHMENT0 :
++		              (stereoFrame == STEREO_LEFT ? (int)GL_BACK_LEFT : (int)GL_BACK_RIGHT);
++#else
+ 		if ( stereoFrame == STEREO_LEFT ) {
+ 			cmd->buffer = (int)GL_BACK_LEFT;
+ 		} else if ( stereoFrame == STEREO_RIGHT ) {
+@@ -319,6 +339,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
+ 		} else {
+ 			ri.Error( ERR_FATAL, "RE_BeginFrame: Stereo is enabled, but stereoFrame was %i", stereoFrame );
+ 		}
++#endif
+ 	}
+ 	else
+ 	{
+diff --git a/code/renderer/tr_local.h b/code/renderer/tr_local.h
+index 79f6b559..3d92702c 100644
+--- a/code/renderer/tr_local.h
++++ b/code/renderer/tr_local.h
+@@ -1805,6 +1805,9 @@ typedef struct {
+ typedef struct {
+ 	int		commandId;
+ 	int		buffer;
++#ifdef PS5_Q3VR
++	int		ps5vrEye;
++#endif
+ } drawBufferCommand_t;
+ 
+ typedef struct {
+diff --git a/code/renderer/tr_main.c b/code/renderer/tr_main.c
+index b64affa4..fbfd36f1 100644
+--- a/code/renderer/tr_main.c
++++ b/code/renderer/tr_main.c
+@@ -22,6 +22,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ // tr_main.c -- main control flow for each frame
+ 
+ #include "tr_local.h"
++#ifdef PS5_Q3VR
++#include "ps5_q3vr_engine.h"
++#endif
+ 
+ #include <string.h> // memcpy
+ 
+@@ -1678,10 +1681,63 @@ void R_RenderView( const viewParms_t *parms ) {
+ 
+ 	firstDrawSurf = tr.refdef.numDrawSurfs;
+ 
++#ifdef PS5_Q3VR
++	float ps5vrProjection[16];
++	int ps5vrX = 0, ps5vrY = 0, ps5vrW = 0, ps5vrH = 0;
++	int ps5vrEye = tr.viewParms.stereoFrame == STEREO_RIGHT ? 1 : 0;
++	int ps5vrView = 0;
++
++	if (PS5Q3VR_IsActive() && (tr.refdef.rdflags & RDF_NOWORLDMODEL)) {
++		/* UI banner and HUD models have their own view and projection. Keep
++		 * those intact, but map the source viewport to the current eye. */
++		const int eyeWidth = glConfig.vidWidth / 2;
++		tr.viewParms.viewportX = ps5vrEye * eyeWidth + tr.viewParms.viewportX / 2;
++		tr.viewParms.viewportWidth /= 2;
++		tr.viewParms.scissorX = ps5vrEye * eyeWidth + tr.viewParms.scissorX / 2;
++		tr.viewParms.scissorWidth /= 2;
++	} else {
++		/* The VR transform writes the eye axes. Do not alias its input
++		 * matrix with the output matrix: that corrupts the second/third
++		 * axes as they are calculated. */
++		vec3_t ps5vrBaseOrigin;
++		vec3_t ps5vrBaseAxis[3];
++		VectorCopy(tr.viewParms.or.origin, ps5vrBaseOrigin);
++		AxisCopy(tr.viewParms.or.axis, ps5vrBaseAxis);
++
++		ps5vrView = PS5Q3VR_GetView(ps5vrEye, ps5vrBaseOrigin, ps5vrBaseAxis,
++		                            tr.viewParms.or.origin, tr.viewParms.or.axis,
++		                            ps5vrProjection,
++		                            &ps5vrX, &ps5vrY, &ps5vrW, &ps5vrH);
++		if (ps5vrView) {
++			tr.viewParms.viewportX = ps5vrX;
++			tr.viewParms.viewportY = ps5vrY;
++			tr.viewParms.viewportWidth = ps5vrW;
++			tr.viewParms.viewportHeight = ps5vrH;
++			tr.viewParms.scissorX = ps5vrX;
++			tr.viewParms.scissorY = ps5vrY;
++			tr.viewParms.scissorWidth = ps5vrW;
++			tr.viewParms.scissorHeight = ps5vrH;
++			/* Keep culling wider than the asymmetric lens projection. */
++			tr.viewParms.fovX = 120.0f;
++			tr.viewParms.fovY = 110.0f;
++		}
++	}
++#endif
++
+ 	// set viewParms.world
+ 	R_RotateForViewer();
+ 
+ 	R_SetupProjection( &tr.viewParms, r_zproj->value, qtrue );
++#ifdef PS5_Q3VR
++	if (ps5vrView) {
++		/* R_SetupProjectionZ later fills the depth terms; replace only X/Y and
++		 * lens-centre terms with the PSVR2 asymmetric projection. */
++		tr.viewParms.projectionMatrix[0] = ps5vrProjection[0];
++		tr.viewParms.projectionMatrix[5] = ps5vrProjection[5];
++		tr.viewParms.projectionMatrix[8] = ps5vrProjection[8];
++		tr.viewParms.projectionMatrix[9] = ps5vrProjection[9];
++	}
++#endif
+ 
+ 	R_GenerateDrawSurfs();
+ 
+diff --git a/code/renderer/tr_scene.c b/code/renderer/tr_scene.c
+index 84ca52e4..c3cef9ee 100644
+--- a/code/renderer/tr_scene.c
++++ b/code/renderer/tr_scene.c
+@@ -21,6 +21,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+ 
+ #include "tr_local.h"
++#ifdef PS5_Q3VR
++#include "../qcommon/cm_public.h" /* PS5VR_AB_20261021_INCLUDE */
++#endif
++#ifdef PS5_Q3VR
++#include "ps5_q3vr_engine.h" /* PS5VR_CROSSHAIR_STAGE1_INCLUDE */
++#endif
+ 
+ static int			r_firstSceneDrawSurf;
+ #ifdef USE_PMLIGHT
+@@ -376,6 +382,104 @@ Rendering a scene may require multiple views to be rendered
+ to handle mirrors,
+ @@@@@@@@@@@@@@@@@@@@@
+ */
++/* PS5VR_CROSSHAIR_STAGE1_BEGIN */
++#ifdef PS5_Q3VR
++/*
++ * Experimental renderer-side reticle, not a game-logic collision raycast.
++ * Render one *world-space* sprite per stereo scene. Both eyes receive the
++ * same Quake-world target and their individual head/eye projections render it.
++ * The QVM's old flat crosshair should be disabled (cg_drawCrosshair=0).
++ *
++ * Future stage: supply a hit point from cgame's weapon trace rather than a
++ * fixed-distance point. Avoid injecting in RDF_NOWORLDMODEL HUD/score views.
++ */
++static void PS5Q3VR_AddWorldReticle(const refdef_t *fd) {
++    static cvar_t *enable, *distance, *angularSize;
++    static cvar_t *traceEnabled;
++    static qhandle_t shader;
++    static qboolean shaderChecked = qfalse;
++    refEntity_t ent;
++    float metres, degrees, quakeDistance, radius;
++    vec3_t traceOrigin, traceDirection;
++    int k;
++
++    if (!PS5Q3VR_IsActive() || (fd->rdflags & RDF_NOWORLDMODEL)) {
++        return;
++    }
++    if (!enable) {
++        enable = ri.Cvar_Get("ps5vr_crosshair", "1", CVAR_ARCHIVE);
++        distance = ri.Cvar_Get("ps5vr_crosshairDistance", "4.0", CVAR_ARCHIVE);
++        angularSize = ri.Cvar_Get("ps5vr_crosshairAngle", "0.75", CVAR_ARCHIVE);
++        traceEnabled = ri.Cvar_Get("ps5vr_crosshairTrace", "0", CVAR_ARCHIVE);
++    }
++    if (!enable->integer) return;
++
++    if (!shaderChecked) {
++        shaderChecked = qtrue;
++        shader = RE_RegisterShaderNoMip("ps5vr/reticle");
++        if (!shader) {
++            ri.Printf(PRINT_WARNING,
++                "ps5vr: gfx/2d/crosshaira missing; VR reticle disabled\n");
++        }
++    }
++    if (!shader) return;
++
++    metres = distance->value;
++    if (metres < 0.75f) metres = 0.75f;
++    if (metres > 50.0f) metres = 50.0f;
++    degrees = angularSize->value;
++    if (degrees < 0.1f) degrees = 0.1f;
++    if (degrees > 3.0f) degrees = 3.0f;
++
++    /* Match ps5_q3vr_engine.c's 32 Quake units/metre scale. */
++    quakeDistance = metres * 32.0f;
++    radius = quakeDistance * tanf(degrees * 0.008726646259971648f);
++
++    VectorCopy(fd->vieworg, traceOrigin);
++    VectorCopy(fd->viewaxis[0], traceDirection);
++    Com_Memset(&ent, 0, sizeof(ent));
++    ent.reType = RT_SPRITE;
++    ent.customShader = shader;
++    ent.renderfx = RF_NOSHADOW;
++    ent.radius = radius;
++    ent.shader.u32 = 0xFFFFFFFFu;
++    for (k = 0; k < 3; ++k) {
++        /* fd->viewaxis[0] = player's gameplay aim direction, NOT the
++         * individual tracked eye axis: one shared 3D target, two views. */
++        ent.origin[k] = fd->vieworg[k] + quakeDistance * fd->viewaxis[0][k];
++    }
++    /* PS5VR_AB_20261021_TRACE_BEGIN */
++    /* Test-only static BSP collision.  This is NOT a cgame/QVM weapon trace:
++     * it knows about level brushes, not live players or weapon spread. */
++    if (traceEnabled && traceEnabled->integer && tr.world) {
++        trace_t hit;
++        vec3_t end;
++        const float rayLen = 3200.0f; /* 100 m at the existing 32 units/m */
++        float d, gap;
++        VectorMA(traceOrigin, rayLen, traceDirection, end);
++        CM_BoxTrace(&hit, traceOrigin, end, vec3_origin, vec3_origin,
++                    0, CONTENTS_SOLID, qfalse);
++        if (!hit.startsolid && !hit.allsolid && hit.fraction < 1.0f) {
++            d = rayLen * hit.fraction;
++            /* Keep the sprite in front of the hit plane, not inside it. */
++            gap = 1.0f + d * tanf(degrees * 0.008726646259971648f);
++            /* Stereo near plane in GetView is ~4 Quake units.
++             * If the wall is INSIDE that plane, normal 3D depth testing
++             * cannot display a sprite between eye and wall. */
++            if (d > gap + 4.5f) {
++                d -= gap;
++                for (k = 0; k < 3; ++k)
++                    ent.origin[k] = traceOrigin[k] + d * traceDirection[k];
++                ent.radius = d * tanf(degrees * 0.008726646259971648f);
++            }
++        }
++    }
++    /* PS5VR_AB_20261021_TRACE_END */
++    RE_AddRefEntityToScene(&ent, qfalse);
++}
++#endif /* PS5_Q3VR */
++/* PS5VR_CROSSHAIR_STAGE1_END */
++
+ void RE_RenderScene( const refdef_t *fd ) {
+ 	viewParms_t		parms;
+ 	int				startTime;
+@@ -444,6 +548,10 @@ void RE_RenderScene( const refdef_t *fd ) {
+ 	tr.refdef.litSurfs = backEndData->litSurfs;
+ #endif
+ 
++	#ifdef PS5_Q3VR
++	PS5Q3VR_AddWorldReticle(fd); /* PS5VR_CROSSHAIR_STAGE1_CALL */
++#endif
++
+ 	tr.refdef.num_entities = r_numentities - r_firstSceneEntity;
+ 	tr.refdef.entities = &backEndData->entities[r_firstSceneEntity];
+ 
